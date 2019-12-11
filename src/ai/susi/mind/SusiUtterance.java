@@ -19,7 +19,6 @@
 
 package ai.susi.mind;
 
-import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
@@ -44,7 +43,7 @@ public class SusiUtterance {
 
     private final static String CATCHONE_CAPTURE_GROUP_STRING = "(^\\S+)"; // only one word
     private final static String CATCHALL_CAPTURE_GROUP_STRING = "(.*)"; // greedy capturing everything is the best choice: that covers words phrases as well
-    private final static Pattern CATCHONE_CAPTURE_GROUP_PATTERN = Pattern.compile(Pattern.quote(CATCHONE_CAPTURE_GROUP_STRING));
+    //private final static Pattern CATCHONE_CAPTURE_GROUP_PATTERN = Pattern.compile(Pattern.quote(CATCHONE_CAPTURE_GROUP_STRING));
     private final static Pattern CATCHALL_CAPTURE_GROUP_PATTERN = Pattern.compile(Pattern.quote(CATCHALL_CAPTURE_GROUP_STRING));
     private final static Pattern dspace = Pattern.compile("  ");
     private final static Pattern wspace = Pattern.compile(",|;:");
@@ -53,6 +52,7 @@ public class SusiUtterance {
     private Type type;
     private final boolean hasCaptureGroups;
     private final int meatsize;
+    private int line;
 
     /**
      * Create a phrase using a json data structure containing the phrase description.
@@ -65,20 +65,27 @@ public class SusiUtterance {
     public SusiUtterance(JSONObject json) throws PatternSyntaxException {
         if (!json.has("expression")) throw new PatternSyntaxException("expression missing", "", 0);
 
-        Type t = Type.minor;
+        this.type = Type.minor;
         if (json.has("type")) try {
-            t = Type.valueOf(json.getString("type"));
+            this.type = Type.valueOf(json.getString("type"));
         } catch (IllegalArgumentException e) {
             //Logger.getLogger("SusiPhrase").warning("type value is wrong: " + json.getString("type"));
         }
+
+        this.line = json.has("line") ? json.getInt("line") : 0;
 
         String expression = normalizeExpression(json.getString("expression"));
         expression = fixExpression(expression);
         expression = parsePattern(expression);
 
         // write class variables
-        this.pattern = Pattern.compile(expression);
-        this.type = expression.equals("(.*)") ? Type.minor : t;
+        try {
+            this.pattern = Pattern.compile(expression);
+        } catch (PatternSyntaxException e) {
+            // we throw the same exception here to make it possible to debug the event here with a breakpoint
+            throw new PatternSyntaxException(e.getDescription(), e.getPattern(), e.getIndex());
+        }
+        if (expression.equals("(.*)")) this.type = Type.minor;
         this.hasCaptureGroups = expression.replaceAll("\\(\\?", "").indexOf('(') >= 0;
 
         // measure the meat size
@@ -91,9 +98,9 @@ public class SusiUtterance {
      * @param prior if true, this phrase has priority
      * @throws PatternSyntaxException
      */
-    public SusiUtterance(String expression, boolean prior) throws PatternSyntaxException {
-
+    public SusiUtterance(String expression, boolean prior, int line) throws PatternSyntaxException {
         this.type = prior ? Type.prior : Type.minor;
+        this.line = line;
 
         // normalize expression
         expression = normalizeExpression(expression);
@@ -102,6 +109,7 @@ public class SusiUtterance {
 
         // write class variables
         this.pattern = Pattern.compile(expression);
+        if (expression.equals("(.*)")) this.type = Type.minor;
         this.hasCaptureGroups = expression.replaceAll("\\(\\?", "").indexOf('(') >= 0;
 
         // measure the meat size
@@ -140,15 +148,20 @@ public class SusiUtterance {
         return json;
     }
 
+    public int getLine() {
+        return this.line;
+    }
+
     public static String normalizeExpression(String s) {
         s = s.trim().toLowerCase().replaceAll("\\#", "  ");
         Matcher m;
         while ((m = wspace.matcher(s)).find()) s = m.replaceAll(" ");
         while ((m = dspace.matcher(s)).find()) s = m.replaceAll(" ");
         if (s.length() == 0) return s; // prevent StringIndexOutOfBoundsException which can happen in the next line
-        if (".?!".indexOf(s.charAt(s.length() - 1)) >= 0) s = s.substring(0, s.length() - 1).trim();
+        int p = ".?!".indexOf(s.charAt(s.length() - 1));
+        if (p >= 0 && (s.length() == 1 || s.charAt(s.length() - 2) != '\\')) s = s.substring(0, s.length() - 1).trim();
         // to be considered: https://en.wikipedia.org/wiki/Wikipedia:List_of_English_contractionst
-        int p = -1;
+        p = -1;
         while ((p = s.toLowerCase().indexOf("it's ")) >= 0) s = s.substring(0, p + 2) + " is " + s.substring(p + 5);
         while ((p = s.toLowerCase().indexOf("what's ")) >= 0) s = s.substring(0, p + 4) + " is " + s.substring(p + 7);
         return s;
@@ -180,12 +193,14 @@ public class SusiUtterance {
     private static String parseOnePattern(String expression) {
         expression = parseOnePattern(expression, '*', CATCHALL_CAPTURE_GROUP_STRING);
         expression = parseOnePattern(expression, '+', CATCHONE_CAPTURE_GROUP_STRING);
+        expression = expression.replaceAll("\\[", "\\\\[");
+        expression = expression.replaceAll("\\]", "\\\\]");
         return expression;
     }
 
     private static String parseOnePattern(String expression, char meta, String regex) {
         if (expression.length() == 0 || expression.equals("" + meta)) expression = regex;
-        if ("?!:.".indexOf(expression.charAt(expression.length() - 1)) >= 0) expression = expression.substring(0, expression.length() - 1);
+        if ("?!:.".indexOf(expression.charAt(expression.length() - 1)) >= 0 && (expression.length() == 1 || expression.charAt(expression.length() - 2) !='\\')) expression = expression.substring(0, expression.length() - 1);
         if (expression.startsWith(meta + " ")) expression = regex + " " + expression.substring(2);
         if (expression.length() > 0 && expression.charAt(0) == meta) expression = regex + " ?" + expression.substring(1);
         if (expression.endsWith(" " + meta)) expression = expression.substring(0, expression.length() - 2) + " " + regex;
@@ -195,7 +210,7 @@ public class SusiUtterance {
     }
 
     public static boolean isRegularExpression(String expression) {
-        if (expression.indexOf('\\') >=0 || (expression.indexOf('(') >= 0 && expression.indexOf(')') >= 0) ) {
+        if (expression.indexOf(".*") >= 0 || expression.indexOf("\\h*") >= 0 || (expression.indexOf('(') >= 0 && expression.indexOf(')') >= 0) ) {
             // this is a hint that this could be a regular expression.
             // the meatsize of regular expressions must be 0, therefore we must check this in more detail
             try {
@@ -212,7 +227,7 @@ public class SusiUtterance {
         StringBuffer sb = new StringBuffer();
         for (int i = 0; i < expression.length(); i++) {
             char c = expression.charAt(i);
-            if (Character.isLetter(c) || Character.isDigit(c) || c == ' ' || c == '_') sb.append(c);
+            if (Character.isLetter(c) || Character.isDigit(c) || c == '['  || c == ']'  || c == ' ' || c == '_') sb.append(c);
         }
         return sb.toString();
     }
@@ -253,6 +268,7 @@ public class SusiUtterance {
         }
         json.put("type", this.type.name());
         json.put("expression", p);
+        if (this.line > 0) json.put("line", line);
         return json;
     }
 }

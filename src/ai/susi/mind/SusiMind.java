@@ -23,6 +23,7 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -32,7 +33,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Date;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -79,6 +79,7 @@ public class SusiMind {
         public final boolean os;  // only custom skills or skills in os minds may declare wildcard answers. 
 
         public Layer(String name, File path, boolean os) {
+            assert path.exists() : "does not exist: " + path.toString();
             this.name = name;
             this.path = path;
             this.os = os;
@@ -122,13 +123,13 @@ public class SusiMind {
         return this.skillMetadata.get(id).getExamples();
     }
 
-    public Map<SusiSkill.ID, SusiSkill> getSkillMetadata() {
-        return this.skillMetadata;
-    }
-
     public Set<SusiSkill> getFocusSkills(String skillCallName) {
         Set<SusiSkill> skills = this.focusSkills.get(skillCallName.toLowerCase());
         return skills;
+    }
+
+    public Map<SusiSkill.ID, SusiSkill> getSkillMetadata() {
+        return this.skillMetadata;
     }
 
     public SusiMind observe() throws IOException {
@@ -142,43 +143,45 @@ public class SusiMind {
         observe(layer.path, layer.os);
     }
 
-    private void observe(File path, boolean acceptWildcardIntent) throws IOException {
-        assert path.exists() : path.getAbsolutePath();
-        if (!path.exists()) return;
-        for (File f: path.listFiles()) {
-            if (f.isDirectory()) {
-                // recursively step into it
-                observe(f, acceptWildcardIntent);
-            }
-            if (!f.isDirectory() && !f.getName().startsWith(".") && (f.getName().endsWith(".json") || f.getName().endsWith(".txt") || f.getName().endsWith(".aiml"))) {
-                if (!observations.containsKey(f) || f.lastModified() > observations.get(f)) {
-                    DAO.log("observing " + f.toString());
-                    observations.put(f, System.currentTimeMillis());
-                    try {
-                        if (f.getName().endsWith(".json")) {
-                            JSONObject lesson = new JSONObject(new JSONTokener(new FileReader(f)));
-                            learn(lesson, f, false);
-                        }
-                        if (f.getName().endsWith(".txt") || f.getName().endsWith(".ezd") || f.getName().endsWith(".lot")) {
-                            SusiSkill.ID skillid = new SusiSkill.ID(f);
-                            SusiSkill skill = new SusiSkill(new BufferedReader(new FileReader(f)), skillid, acceptWildcardIntent);
-                            learn(skill, skillid, false);
-                        }
-                        if (f.getName().endsWith(".aiml")) {
-                            JSONObject lesson = AIML2Susi.readAIMLSkill(f);
-                            learn(lesson, f, false);
-                        }
-                    } catch (Throwable e) {
-                        DAO.severe("BAD JSON FILE: " + f.getAbsolutePath() + ", " + e.getMessage());
-                        e.printStackTrace();
+    private void observe(File f, boolean acceptWildcardIntent) throws IOException {
+        assert f.exists() : f.getAbsolutePath();
+        if (!f.exists()) return;
+
+        if (!f.isDirectory() && !f.getName().startsWith(".") && (f.getName().endsWith(".json") || f.getName().endsWith(".txt") || f.getName().endsWith(".aiml"))) {
+            if (!observations.containsKey(f) || f.lastModified() > observations.get(f)) {
+                DAO.log("observing " + f.toString());
+                observations.put(f, System.currentTimeMillis());
+                try {
+                    if (f.getName().endsWith(".json")) {
+                        JSONObject lesson = new JSONObject(new JSONTokener(new FileReader(f)));
+                        learn(lesson, f, false);
                     }
+                    if (f.getName().endsWith(".txt") || f.getName().endsWith(".ezd") || f.getName().endsWith(".lot")) {
+                        SusiSkill.ID skillid = new SusiSkill.ID(f);
+                        SusiSkill skill = new SusiSkill(new BufferedReader(new FileReader(f)), skillid, acceptWildcardIntent);
+                        learn(skill, skillid, false);
+                    }
+                    if (f.getName().endsWith(".aiml")) {
+                        JSONObject lesson = AIML2Susi.readAIMLSkill(f);
+                        learn(lesson, f, false);
+                    }
+                } catch (Throwable e) {
+                    DAO.severe("BAD JSON FILE: " + f.getAbsolutePath() + ", " + e.getMessage());
+                    e.printStackTrace();
                 }
             }
+        }
+        if (f.isDirectory() ) {
+           for (File g: f.listFiles()) {
+           	observe(g, acceptWildcardIntent);
+           }
         }
         //this.intenttrigger.forEach((term, map) -> System.out.println("***DEBUG trigger " + term + " -> " + map.toString()));
     }
 
     public SusiMind learn(SusiSkill skill, SusiSkill.ID skillid, boolean acceptFocusSkills) {
+        assert skill != null;
+        assert skillid != null;
 
         // handle focus skills
         if (!acceptFocusSkills && skill.getOn() != null && skill.getOn().length > 0) {
@@ -186,7 +189,7 @@ public class SusiMind {
             for (String o: on) {
                 Set<SusiSkill> skills = this.focusSkills.get(o.toLowerCase());
                 if (skills == null) {
-                    skills = new HashSet<>();
+                    skills = ConcurrentHashMap.newKeySet();
                     this.focusSkills.put(o.toLowerCase(), skills);
                 }
                 skills.add(skill);
@@ -203,7 +206,7 @@ public class SusiMind {
             intent.getKeys().forEach(key -> {
                 Set<SusiIntent> l = this.intenttrigger.get(key);
                 if (l == null) {
-                    l = new HashSet<>();
+                    l = ConcurrentHashMap.newKeySet();
                     this.intenttrigger.put(key, l);
                 }
                 l.add(intent);
@@ -222,6 +225,7 @@ public class SusiMind {
         if (this.memories != null) new Thread(new Runnable() {
             @Override
             public void run() {
+                Thread.currentThread().setName("removeUnanswered");
                 removalPattern.forEach(pattern -> SusiMind.this.memories.removeUnanswered(pattern));
             }
         }).start();
@@ -287,7 +291,7 @@ public class SusiMind {
                 String o = on.getString(i);
                 Set<SusiSkill> skills = this.focusSkills.get(o.toLowerCase());
                 if (skills == null) {
-                    skills = new HashSet<>();
+                    skills = ConcurrentHashMap.newKeySet();
                     this.focusSkills.put(o.toLowerCase(), skills);
                 }
                 skills.add(skill);
@@ -305,7 +309,7 @@ public class SusiMind {
                 intent.getKeys().forEach(key -> {
                     Set<SusiIntent> l = this.intenttrigger.get(key);
                     if (l == null) {
-                        l = new HashSet<>();
+                        l = ConcurrentHashMap.newKeySet();
                         this.intenttrigger.put(key, l);
                     }
                     l.add(intent);
@@ -373,7 +377,7 @@ public class SusiMind {
         SusiLinguistics.tokenizeSentence(userLanguage, query).forEach(token -> {
             Set<SusiIntent> intent_for_category = this.intenttrigger.get(token.categorized);
             Set<SusiIntent> intent_for_original = token.original.equals(token.categorized) ? null : this.intenttrigger.get(token.original);
-            Set<SusiIntent> r = new HashSet<>();
+            Set<SusiIntent> r = ConcurrentHashMap.newKeySet();
             if (intent_for_category != null) r.addAll(intent_for_category);
             if (intent_for_original != null) r.addAll(intent_for_original);
             r.forEach(intent -> ideas.add(new SusiIdea(intent).setToken(token)));
@@ -419,21 +423,36 @@ public class SusiMind {
 
         return plausibleIdeas;
     }
-    
+
+
+    public static SusiThought reactMinds(
+            final String query,
+            final SusiLanguage userLanguage,
+            final ClientIdentity identity,
+            final boolean debug,
+            final SusiThought observation,
+            final SusiMind... mindLayers) {
+        SusiThought thought = null;
+        int mindcount = 0;
+        while (thought == null && mindcount < mindLayers.length) {
+            thought = mindLayers[mindcount++].react(query, userLanguage, identity, debug, observation, mindLayers);
+        }
+        return thought;
+    }
+
     /**
      * react on a user input: this causes the selection of deduction intents and the evaluation of the process steps
      * in every intent up to the moment where enough intents have been applied as consideration. The reaction may also
      * cause the evaluation of operational steps which may cause learning effects within the SusiMind.
      * @param query the user input
-     * @param maxcount the maximum number of answers (typical is only one)
      * @param client authentication string of the user
      * @param observation an initial thought - that is what susi experiences in the context. I.e. location and language of the user
      * @return
      */
-    public List<SusiThought> react(String query, SusiLanguage userLanguage, int maxcount, ClientIdentity identity, boolean debug, SusiThought observation, SusiMind... minds) {
+    public SusiThought react(String query, SusiLanguage userLanguage, ClientIdentity identity, boolean debug, SusiThought observation, SusiMind... minds) {
         // get the history a list of thoughts
         long t0 = System.currentTimeMillis();
-        SusiArgument observation_argument = new SusiArgument();
+        SusiArgument observation_argument = new SusiArgument(identity, userLanguage);
         if (observation != null && observation.length() > 0) observation_argument.think(observation);
         List<SusiCognition> cognitions = this.memories == null ? new ArrayList<>() : this.memories.getCognitions(identity.getClient(), true);
         long t1 = System.currentTimeMillis();
@@ -449,30 +468,36 @@ public class SusiMind {
         query = SusiUtterance.normalizeExpression(query);
 
         // find an answer
-        List<SusiThought> answers = new ArrayList<>();
+        SusiThought answer = null;
         List<SusiIdea> ideas = creativity(query, userLanguage, recall, 100); // create a list of ideas which are possible intents
         long t4 = System.currentTimeMillis();
 
         // test all ideas: the ideas are ranked in such a way that the best one is considered first
+        JSONArray testedIdeaQueryPatterns = new JSONArray();
         ideatest: for (SusiIdea idea: ideas) {
             // compute an argument: because one intent represents a horn clause, the argument is a deduction track, a "proof" of the result.
             long t5 = System.currentTimeMillis();
-            SusiArgument argument = idea.getIntent().consideration(query, recall, idea.getToken(), this, identity);
+            SusiArgument argument = idea.getIntent().consideration(query, recall, idea.getToken(), debug, identity, userLanguage, minds);
             long t6 = System.currentTimeMillis();
             if (t6 - t5 > 100) DAO.log("=== Wasted " + (t6 - t5) + " milliseconds with intent " + idea.getIntent().toJSON());
 
             // arguments may fail; a failed proof is one which does not exist. Therefore an argument may be empty
             if (argument == null) {
+                testedIdeaQueryPatterns.put(new JSONObject().put(idea.getIntent().getUtterancesSample(), "fail"));
                 continue ideatest; // consider only sound arguments
             }
             try {
-                answers.add(argument.finding(identity, userLanguage, debug, minds));
+                answer = argument.finding(identity, userLanguage, debug, minds);
+                testedIdeaQueryPatterns.put(new JSONObject().put(idea.getIntent().getUtterancesSample(), "success"));
+                 // a valid idea
+                break;
             } catch (ReactionException e) {
+                testedIdeaQueryPatterns.put(new JSONObject().put(idea.getIntent().getUtterancesSample(), e.getMessage()));
                 // a bad argument (this is not a runtime error, it is a signal that the thought cannot be thought to the end
                 continue ideatest;
-            } // a valid idea
-            if (answers.size() >= maxcount) break; // and stop if we are done
+            }
         }
+        if (answer != null) answer.put("trace", testedIdeaQueryPatterns);
         long t7 = System.currentTimeMillis();
         //DAO.log("+++ react run time: " + (t1 - t0) + " milliseconds - getCognitions");
         //DAO.log("+++ react run time: " + (t2 - t1) + " milliseconds - think");
@@ -481,11 +506,10 @@ public class SusiMind {
         //DAO.log("+++ react run time: " + (t7 - t4) + " milliseconds - test ideas");
 
         // attach the ideas to the thought to have that information available for the explain command
-        SusiThought t = answers.size() > 0 ? answers.get(0) : null;
-        JSONArray a = t == null ? null : t.getData();
+        JSONArray a = answer == null ? null : answer.getData();
         if (a != null) {
             for (int i = 0; i < a.length(); i++) a.getJSONObject(i).remove("idea"); // in case that the ideas size is shorter than the current array length
-            if (debug && answers.size() > 0) {
+            if (debug) {
                 int i = 0;
                 for (SusiIdea idea: ideas) {
                     if (a.length() <= i) {
@@ -497,43 +521,31 @@ public class SusiMind {
                 }
             }
         }
-        return answers;
-    }
-
-    public static List<SusiThought> reactMinds(
-            final String query,
-            final SusiLanguage userLanguage,
-            final int maxcount,
-            final ClientIdentity identity,
-            final boolean debug,
-            final SusiThought observation,
-            final SusiMind... mindLayers) {
-        List<SusiThought> thoughts = new ArrayList<>();
-        int mindcount = 0;
-        while (thoughts.isEmpty() && mindcount < mindLayers.length) {
-            thoughts = mindLayers[mindcount++].react(query, userLanguage, maxcount, identity, debug, observation, mindLayers);
-        }
-        return thoughts;
+        return answer;
     }
 
     public class Reaction {
-        private SusiAction action;
+        private List<SusiAction> actions;
         private SusiThought mindstate;
 
         public Reaction(String query, SusiLanguage userLanguage, ClientIdentity identity, boolean debug, SusiThought observation, SusiMind... minds) throws ReactionException {
-            List<SusiThought> thoughts = react(query, userLanguage, 1, identity, debug, observation, minds);
-            this.mindstate = thoughts.get(0);
-            List<SusiAction> actions = this.mindstate.getActions(false);
+            this.mindstate = react(query, userLanguage, identity, debug, observation, minds);
+            if (this.mindstate == null) throw new ReactionException("no thoughts generated"); // that should be semantically correct if the deduction fails
+            this.actions = this.mindstate.getActions(false);
             if (actions.isEmpty()) throw new ReactionException("this mind has no idea what it should do.");
-            this.action = actions.get(0);
         }
 
-        public SusiAction getAction() {
-            return this.action;
+        public List<SusiAction> getActions() {
+            return this.actions;
         }
 
-        public String getExpression() {
-            return this.action.getStringAttr("expression");
+        public List<String> getExpressions() {
+            final List<String> expresssions = new ArrayList<>();
+            this.actions.forEach(action -> {
+                String a = action.getStringAttr("expression");
+                if (a != null && a.length() > 0) expresssions.add(a);
+            });
+            return expresssions;
         }
 
         public SusiThought getMindstate() {
@@ -541,7 +553,7 @@ public class SusiMind {
         }
 
         public String toString() {
-            return this.getExpression();
+            return this.getExpressions().toString();
         }
     }
 
@@ -552,27 +564,31 @@ public class SusiMind {
         }
     }
 
-    // Function overloading - if duration parameter is not passed then use 7 as default value.
+    // Function overloading - if duration parameter is not passed then use 7 as
+    // default value.
     public JSONObject getSkillMetadata(String model, String group, String language, String skillname) {
-        return getSkillMetadata(model, group, language, skillname, 7);
+        return getSkillMetadata(model, group, language, skillname, 7, DAO.model_watch_dir);
     }
 
     public JSONObject getSkillMetadata(String model, String group, String language, String skillname, int duration) {
+        return getSkillMetadata(model, group, language, skillname, 7, DAO.model_watch_dir);
+    }
 
-        JSONObject skillMetadata = new JSONObject(true)
-                .put("model", model)
-                .put("group", group)
-                .put("language", language);
-        File modelpath = new File(DAO.model_watch_dir, model);
+    public JSONObject getSkillMetadata(String model, String group, String language, String skillname, int duration,
+            File parentDirectory) {
+        JSONObject skillMetadata = new JSONObject(true).put("model", model).put("group", group).put("language",
+                language);
+        File modelpath = new File(parentDirectory, model);
         File grouppath = new File(modelpath, group);
         File languagepath = new File(grouppath, language);
         File skillpath = DAO.getSkillFileInLanguage(languagepath, skillname, false);
         DateFormat dateFormatType = DateParser.iso8601Format;
-        skillname = skillpath.getName().replaceAll(".txt", ""); // fixes the bad name (lowercased) to the actual right name
+        skillname = skillpath.getName().replaceAll(".txt", ""); // fixes the bad name (lowercased) to the actual right
+                                                                // name
 
         // default values
         skillMetadata.put("developer_privacy_policy", JSONObject.NULL);
-        skillMetadata.put("descriptions",JSONObject.NULL);
+        skillMetadata.put("descriptions", JSONObject.NULL);
         skillMetadata.put("image", JSONObject.NULL);
         skillMetadata.put("author", JSONObject.NULL);
         skillMetadata.put("author_url", JSONObject.NULL);
@@ -596,21 +612,24 @@ public class SusiMind {
         for (Map.Entry<SusiSkill.ID, SusiSkill> entry : getSkillMetadata().entrySet()) {
             SusiSkill skill = entry.getValue();
             SusiSkill.ID skillid = entry.getKey();
-            if (skillid.hasModel(model) &&
-                    skillid.hasGroup(group) &&
-                    skillid.hasLanguage(language) &&
-                    skillid.hasName(skillname)) {
-                skillMetadata.put("skill_name", skill.getSkillName() ==null ? JSONObject.NULL: skill.getSkillName());
+            if (skillid.hasModel(model) && skillid.hasGroup(group) && skillid.hasLanguage(language)
+                    && skillid.hasName(skillname)) {
+                skillMetadata.put("skill_name", skill.getSkillName() == null ? JSONObject.NULL : skill.getSkillName());
                 skillMetadata.put("protected", skill.getProtectedSkill());
-                skillMetadata.put("developer_privacy_policy", skill.getDeveloperPrivacyPolicy() ==null ? JSONObject.NULL:skill.getDeveloperPrivacyPolicy());
-                skillMetadata.put("descriptions", skill.getDescription() ==null ? JSONObject.NULL:skill.getDescription());
-                skillMetadata.put("image", skill.getImage() ==null ? JSONObject.NULL: skill.getImage());
-                skillMetadata.put("author", skill.getAuthor()  ==null ? JSONObject.NULL:skill.getAuthor());
-                skillMetadata.put("author_url", skill.getAuthorURL() ==null ? JSONObject.NULL:skill.getAuthorURL());
-                skillMetadata.put("author_email", skill.getAuthorEmail() ==null ? JSONObject.NULL:skill.getAuthorEmail());
-                skillMetadata.put("terms_of_use", skill.getTermsOfUse() ==null ? JSONObject.NULL:skill.getTermsOfUse());
+                skillMetadata.put("developer_privacy_policy",
+                        skill.getDeveloperPrivacyPolicy() == null ? JSONObject.NULL
+                                : skill.getDeveloperPrivacyPolicy());
+                skillMetadata.put("descriptions",
+                        skill.getDescription() == null ? JSONObject.NULL : skill.getDescription());
+                skillMetadata.put("image", skill.getImage() == null ? JSONObject.NULL : skill.getImage());
+                skillMetadata.put("author", skill.getAuthor() == null ? JSONObject.NULL : skill.getAuthor());
+                skillMetadata.put("author_url", skill.getAuthorURL() == null ? JSONObject.NULL : skill.getAuthorURL());
+                skillMetadata.put("author_email",
+                        skill.getAuthorEmail() == null ? JSONObject.NULL : skill.getAuthorEmail());
+                skillMetadata.put("terms_of_use",
+                        skill.getTermsOfUse() == null ? JSONObject.NULL : skill.getTermsOfUse());
                 skillMetadata.put("dynamic_content", skill.getDynamicContent());
-                skillMetadata.put("examples", skill.getExamples() ==null ? JSONObject.NULL: skill.getExamples());
+                skillMetadata.put("examples", skill.getExamples() == null ? JSONObject.NULL : skill.getExamples());
                 skillMetadata.put("skill_rating", DAO.getSkillRating(model, group, language, skillname));
                 skillMetadata.put("supported_languages", DAO.getSupportedLanguages(model, group, language, skillname));
                 skillMetadata.put("reviewed", DAO.getSkillReviewStatus(model, group, language, skillname));
@@ -620,7 +639,8 @@ public class SusiMind {
                 skillMetadata.put("usage_count", DAO.getSkillUsage(model, group, language, skillname, duration));
                 skillMetadata.put("skill_tag", skillname);
                 skillMetadata.put("lastModifiedTime", DAO.getSkillModifiedTime(model, group, language, skillname));
-                skillMetadata.put("creationTime", DAO.getSkillCreationTime(model, group, language, skillname, skillpath));
+                skillMetadata.put("creationTime",
+                        DAO.getSkillCreationTime(model, group, language, skillname, skillpath));
             }
         }
 
@@ -632,26 +652,21 @@ public class SusiMind {
         } catch (IOException e) {
             e.printStackTrace();
         }
-        if(attr!=null){
-            skillMetadata.put("lastAccessTime" , attr.lastAccessTime());
+        if (attr != null) {
+            skillMetadata.put("lastAccessTime", attr.lastAccessTime());
         }
         return skillMetadata;
     }
 
     public static void main(String[] args) {
         SusiMind mem = new SusiMind(null);
-        SusiMind.Layer testlayer = new SusiMind.Layer("test", new File(new File("conf"), "susi"), true);
+        SusiMind.Layer testlayer = new SusiMind.Layer("test", FileSystems.getDefault().getPath("conf", "os_skills", "test", "en", "alarm.txt").toFile(), true);
         mem.addLayer(testlayer);
-        try {
-            System.out.println(mem.new Reaction("I feel funny", SusiLanguage.unknown, new ClientIdentity("localhost"), true, new SusiThought(), mem).getExpression());
-        } catch (ReactionException e) {
-            e.printStackTrace();
-        }
-        try {
-            System.out.println(mem.new Reaction("Help me!", SusiLanguage.unknown, new ClientIdentity("localhost"), true, new SusiThought(), mem).getExpression());
-        } catch (ReactionException e) {
-            e.printStackTrace();
-        }
+        try {mem.observe();} catch (IOException e1) {}
+        mem.skillMetadata.values().forEach(skill -> System.out.println(skill.toJSON().toString(2)));
+        SusiThought mindstate = mem.react("set an alarm in one minute", SusiLanguage.unknown, ClientIdentity.ANONYMOUS, true, new SusiThought(), mem);
+        List<SusiAction> actions = mindstate.getActions(false);
+        System.out.println(actions);
     }
 
 }

@@ -21,7 +21,6 @@ package ai.susi;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -113,6 +112,7 @@ public class DAO {
     private static JsonFile login_keys;
     public static JsonTray group;
     public static JsonTray apiKeys;
+    public static JsonTray captchaConfig;
 
     // CMS Schema for server usage
     public static JsonTray skillInfo;
@@ -130,6 +130,7 @@ public class DAO {
     public static JsonTray skillSupportedLanguages;
     public static JsonTray ratingsOverTime;
     public static JsonTray reportedSkills;
+    public static JsonTray skillSlideshow;
     
     // temporary solution for draft storage
     public static Map<String, Map<String, Draft>> drafts = new HashMap<>(); // key is the user's identity, inner map key is draft id
@@ -157,7 +158,7 @@ public class DAO {
      * @param configMap
      * @param dataPath the path to the data directory
      */
-    public static void init(Map<String, String> configMap, Path dataPath) throws Exception{
+    public static void init(Map<String, String> configMap, Path dataPath, boolean learnWorldKnowledge) throws Exception{
 
         log("initializing SUSI DAO");
 
@@ -177,7 +178,7 @@ public class DAO {
         }
         if (!susi_chatlog_dir.exists()) susi_chatlog_dir.mkdirs();
         if (!susi_skilllog_dir.exists()) susi_skilllog_dir.mkdirs();
-        if (!draft_dir.exists()) susi_skilllog_dir.mkdirs();
+        if (!draft_dir.exists()) draft_dir.mkdirs();
         
         // initialize the memory as a background task to prevent that this blocks too much
         susi_memory = new SusiMemory(susi_chatlog_dir, susi_skilllog_dir, ATTENTION_TIME);
@@ -202,24 +203,26 @@ public class DAO {
         if (!susi_generic_skills_media_discovery.path.exists()) susi_generic_skills_media_discovery.path.mkdirs();
 
         // wake up susi
-        SusiMind.Layer system_skills_include = new SusiMind.Layer("General", new File(new File(conf_dir, "os_skills"), "include"), true);
-        SusiMind.Layer system_skills_linuguistic = new SusiMind.Layer("General", new File(new File(conf_dir, "os_skills"), "linguistic"), true);
-        SusiMind.Layer system_skills_operation = new SusiMind.Layer("General", new File(new File(conf_dir, "os_skills"), "operation"), true);
-        SusiMind.Layer system_skills_system = new SusiMind.Layer("General", new File(new File(conf_dir, "os_skills"), "system"), true);
-        SusiMind.Layer system_skills_local = new SusiMind.Layer("Local", new File(new File(conf_dir, "os_skills"), "local"), true);
         susi = new SusiMind(susi_memory);
-        susi.addLayer(system_skills_include);
-        susi.addLayer(system_skills_linuguistic);
-        if (model_watch_dir.exists()) {
-            SusiMind.Layer model_skills = new SusiMind.Layer("Model", new File(model_watch_dir, "general"), false);
-            susi.addLayer(model_skills);
+        if (learnWorldKnowledge) {
+            SusiMind.Layer system_skills_include = new SusiMind.Layer("General", new File(new File(conf_dir, "os_skills"), "include"), true);
+            SusiMind.Layer system_skills_linuguistic = new SusiMind.Layer("General", new File(new File(conf_dir, "os_skills"), "linguistic"), true);
+            SusiMind.Layer system_skills_operation = new SusiMind.Layer("General", new File(new File(conf_dir, "os_skills"), "operation"), true);
+            SusiMind.Layer system_skills_system = new SusiMind.Layer("General", new File(new File(conf_dir, "os_skills"), "system"), true);
+            SusiMind.Layer system_skills_test = new SusiMind.Layer("Local", new File(new File(conf_dir, "os_skills"), "test"), true);
+            susi.addLayer(system_skills_include);
+            susi.addLayer(system_skills_linuguistic);
+            susi.addLayer(system_skills_operation);
+            susi.addLayer(system_skills_system);
+            susi.addLayer(system_skills_test);
+            if (model_watch_dir.exists()) {
+                SusiMind.Layer model_skills = new SusiMind.Layer("Model", new File(model_watch_dir, "general"), false);
+                susi.addLayer(model_skills);
+            }
+            if (DAO.getConfig("local.mode", false)) {
+                susi.addLayer(susi_generic_skills_media_discovery);
+            }
         }
-        if (DAO.getConfig("local.mode", false)) {
-            susi.addLayer(system_skills_local);
-            susi.addLayer(susi_generic_skills_media_discovery);
-        }
-        susi.addLayer(system_skills_operation);
-        susi.addLayer(system_skills_system);
 
         // initialize public and private keys
         public_settings = new Settings(new File("data/settings/public.settings.json"));
@@ -293,6 +296,13 @@ public class DAO {
         apiKeys = new JsonTray(apiKeys_per.toFile(), apiKeys_vol.toFile(), 1000000);
         OS.protectPath(apiKeys_per);
         OS.protectPath(apiKeys_vol);
+
+        /*ReCaptcha config*/
+        Path captchaConfig_per = settings_dir.resolve("captchaConfig.json");
+        Path captchaConfig_vol = settings_dir.resolve("captchaConfig_session.json");
+        captchaConfig = new JsonTray(captchaConfig_per.toFile(), captchaConfig_vol.toFile(), 1000000);
+        OS.protectPath(captchaConfig_per);
+        OS.protectPath(captchaConfig_vol);
 
         /* Basic attributes related to a skill*/
         Path susi_skill_info_dir = dataPath.resolve("skill_info");
@@ -415,6 +425,13 @@ public class DAO {
         OS.protectPath(reportedSkills_per);
         OS.protectPath(reportedSkills_vol);
 
+        //Skill slideshow
+        Path skillSlideshow_per = susi_skill_rating_dir.resolve("skillSlideshow.json");
+        Path skillSlideshow_vol = susi_skill_rating_dir.resolve("skillSlideshow_session.json");
+        skillSlideshow = new JsonTray(skillSlideshow_per.toFile(), skillSlideshow_vol.toFile(), 1000000);
+        OS.protectPath(skillSlideshow_per);
+        OS.protectPath(skillSlideshow_vol);
+
         // open index
         Path index_dir = dataPath.resolve("index");
         if (index_dir.toFile().exists()) OS.protectPath(index_dir); // no other permissions to this path
@@ -428,6 +445,7 @@ public class DAO {
         // initializing susi minf concurrently
         Thread susi_mind_init = new Thread() {
             public void run() {
+                Thread.currentThread().setName("ObserveLearn");
                 try {
                     susi.observe();
                 } catch (IOException e) {
@@ -444,9 +462,10 @@ public class DAO {
         access = new AccessTracker(log_dump_dir.toFile(), ACCESS_DUMP_FILE_PREFIX, 60000, 3000);
         access.start(); // start monitor
 
-        log("Starting Skill Data pull thread");
-        SkillTransactions.init(getConfig("skill_repo.pull_delay", 60000));
-
+        if (getConfig("skill_repo.enable", true)) {
+                log("Starting Skill Data pull thread");
+                SkillTransactions.init(getConfig("skill_repo.pull_delay", 60000));
+        }
         log("finished DAO initialization");
     }
 
@@ -523,6 +542,10 @@ public class DAO {
     public static boolean getConfig(String key, boolean default_val) {
         String value = config.get(key);
         return value == null ? default_val : value.equals("true") || value.equals("on") || value.equals("1");
+    }
+
+    public static void setConfig(String key, String value) {
+        config.put(key, value);
     }
 
     public static Set<String> getConfigKeys() {
@@ -893,8 +916,8 @@ public class DAO {
         return skillCreationTime;
     }
 
-    public static void sortByAvgStar(List<JSONObject> jsonValues, boolean ascending) {
-        // Get skills based on ratings
+    public static void sortByMostRating(List<JSONObject> jsonValues, boolean ascending) {
+        // Get skills based on most ratings
         Collections.sort(jsonValues, new Comparator<JSONObject>() {
             @Override
             public int compare(JSONObject a, JSONObject b) {
@@ -922,6 +945,33 @@ public class DAO {
                     } else {
                         return ascending ? 1 : -1;
                     }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+                return result;
+            }
+        });
+    }
+
+    public static void sortByTopRating(List<JSONObject> jsonValues, boolean ascending) {
+        // Get skills based on top ratings
+        Collections.sort(jsonValues, new Comparator<JSONObject>() {
+            @Override
+            public int compare(JSONObject a, JSONObject b) {
+                Object valA, valB;
+                int result=0;
+
+                try {
+                    valA = a.opt("skill_rating");
+                    valB = b.opt("skill_rating");
+                    if (valA == null || !((valA instanceof JSONObject))) valA = new JSONObject().put("stars", new JSONObject().put("avg_star", 0.0f));
+                    if (valB == null || !((valB instanceof JSONObject))) valB = new JSONObject().put("stars", new JSONObject().put("avg_star", 0.0f));
+                    JSONObject starsAObject = ((JSONObject) valA).getJSONObject("stars");
+                    JSONObject starsBObject = ((JSONObject) valB).getJSONObject("stars");
+                    float avgA = starsAObject.getFloat("avg_star");
+                    float avgB = starsBObject.getFloat("avg_star");
+                    return ascending ? Float.compare(avgA, avgB) : Float.compare(avgB, avgA);
+
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
@@ -1201,7 +1251,7 @@ public class DAO {
                     if (sn != null && (sn.equals(skill_name) || sn.toLowerCase().equals(skill_name) || sn.toLowerCase().replace(' ', '_').equals(skill_name))) {
                         return new File(languagepath, n);
                     }
-                } catch (JSONException | FileNotFoundException | SusiActionException e) {
+                } catch (IOException | JSONException | SusiActionException e) {
                     continue;
                 }
             }

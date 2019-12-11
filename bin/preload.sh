@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-JARFILE="build/libs/susi_server-all.jar"
+JARFILE="build/libs/susi_server.jar"
 INSTALLATIONCONFIG="data/settings/installation.txt"
 PIDFILE="data/susi.pid"
 DFAULTCONFIG="conf/config.properties"
@@ -41,7 +41,7 @@ else
     exit 1
 fi
 
-cmdline="java";
+cmdline="java -Xverify:none";
 
 if [ -n "$ENVXmx" ] ; then cmdline="$cmdline -Xmx$ENVXmx";
 elif [ -n "$CUSTOMXmx" ]; then cmdline="$cmdline -Xmx$CUSTOMXmx";
